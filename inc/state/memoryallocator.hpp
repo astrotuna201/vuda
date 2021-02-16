@@ -11,7 +11,7 @@ namespace vuda
         public:
 
             // allocate
-            memory_block(const vk::DeviceSize offset, const vk::DeviceSize size, const vk::Buffer& buffer) : m_offset(offset), m_size(size), m_ptr(nullptr), m_buffer(buffer)
+            memory_block(const vk::DeviceMemory memory, const vk::DeviceSize offset, const vk::DeviceSize size, const vk::Buffer& buffer) : m_memory(memory), m_offset(offset), m_size(size), m_ptr(nullptr), m_buffer(buffer)
             {
             }
 
@@ -38,7 +38,7 @@ namespace vuda
                 std::cout << ostr.str();*/
 
                 //
-                // m_free is atomic so no need to guard            
+                // m_free is atomic so no need to guard
                 m_locked.clear(std::memory_order_release);
             }
 
@@ -48,6 +48,11 @@ namespace vuda
             vk::Buffer get_buffer(void) const
             {
                 return m_buffer;
+            }
+
+            vk::DeviceMemory get_memory(void) const
+            {
+                return m_memory;
             }
 
             vk::DeviceSize get_offset(void) const
@@ -68,6 +73,7 @@ namespace vuda
         private:            
             std::atomic_flag m_locked = ATOMIC_FLAG_INIT;
 
+            vk::DeviceMemory m_memory;
             vk::DeviceSize m_offset;
             vk::DeviceSize m_size;
         
@@ -86,7 +92,8 @@ namespace vuda
             */
 
             //const uint32_t memoryTypeIndex, const bool hostVisible,
-            memory_chunk(const vk::PhysicalDevice& physDevice, const vk::Device& device, const vk::MemoryPropertyFlags& memory_properties, const vk::DeviceSize size) :
+            //memory_chunk(const vk::PhysicalDevice& physDevice, const vk::Device& device, const vk::MemoryPropertyFlags& memory_properties, const vk::DeviceSize size) :
+            memory_chunk(const vk::PhysicalDevice& physDevice, const vk::Device& device, const bool hostVisible, const uint32_t memoryTypeIndex, const vk::DeviceSize size) :
                 //
                 // create buffer
                 m_buffer(device.createBufferUnique(vk::BufferCreateInfo(vk::BufferCreateFlags(), size, vk::BufferUsageFlags(bufferUsageFlags::eDefault), vk::SharingMode::eExclusive))),
@@ -94,8 +101,8 @@ namespace vuda
 
                 //
                 // memory information
-                m_hostVisible(memory_properties & vk::MemoryPropertyFlagBits::eHostVisible),
-                m_memoryTypeIndex(vudaFindMemoryType(physDevice, m_memreq.memoryTypeBits, memory_properties)),
+                m_hostVisible(hostVisible),
+                m_memoryTypeIndex(memoryTypeIndex),
 
                 //
                 // allocate chunck of memory with the correct memory alignment 
@@ -108,7 +115,7 @@ namespace vuda
             {
                 //
                 // bind buffer to memory
-                device.bindBufferMemory(m_buffer.get(), m_memory.get(), 0),
+                device.bindBufferMemory(m_buffer.get(), m_memory.get(), 0);
 
                 //
                 //
@@ -116,7 +123,7 @@ namespace vuda
 
                 //
                 // create initial block
-                m_blocks.emplace_back(std::make_unique<memory_block>(0, m_size, m_buffer.get()));
+                m_blocks.emplace_back(std::make_unique<memory_block>(m_memory.get(), 0, m_size, m_buffer.get()));
 
                 //
                 // hello there
@@ -168,7 +175,7 @@ namespace vuda
                             {
                                 //
                                 // create new block
-                                m_blocks.emplace_back(std::make_unique<memory_block>(offset + size, virtualSize - size, m_buffer.get()));
+                                m_blocks.emplace_back(std::make_unique<memory_block>(m_memory.get(), offset + size, virtualSize - size, m_buffer.get()));
                             }
 
                             // if host visible push the memory pointer
@@ -180,7 +187,7 @@ namespace vuda
                             m_blocks[i]->reallocate(offset, size, ptr);
                             return m_blocks[i].get();
                         }
-                    }            
+                    }
                 }
                 return nullptr;
             }
@@ -226,57 +233,99 @@ namespace vuda
             /*
                 public synchronized interface
             */
-
-            //memory_allocator(const vk::PhysicalDevice& physDevice, const vk::Device& device, const bool hostVisible, const uint32_t memoryTypeIndex, const vk::DeviceSize default_alloc_size = (vk::DeviceSize)1 << 20) :
             memory_allocator(const vk::PhysicalDevice& physDevice, const vk::Device& device, const vk::DeviceSize default_alloc_size = (vk::DeviceSize)(1 << 28)) :
                 m_physDevice(physDevice),
                 m_device(device),
-                m_defaultChunkSize(default_alloc_size),
-                //
-                // memory properties -> memory types
-                m_memoryAllocatorTypes{
-                {memoryPropertiesFlags::eDeviceProperties, findMemoryType_Device(physDevice, m_device)},
-                {memoryPropertiesFlags::eHostProperties, findMemoryType_Host(physDevice, m_device)},
-                {memoryPropertiesFlags::eCachedProperties, findMemoryType_Cached(physDevice, m_device)} },
-
-                //
-                // memory properties -> unique index
-                m_memoryIndexToPureIndex{
-                {memoryPropertiesFlags::eDeviceProperties, 0},
-                {memoryPropertiesFlags::eHostProperties, 1},
-                {memoryPropertiesFlags::eCachedProperties, 2} }
+                m_defaultChunkSize(default_alloc_size)
             {
                 //
+                // fetch the memory types and properties from the device
+                VudaMemoryProperties deviceMemProperties(physDevice);
+
                 //
-                vk::DeviceSize device_memory_size = findDeviceLocalMemorySize(physDevice);
+                // resize
+                const uint32_t vudaNumMemTypes = vudaMemoryTypes::eLast;
+                m_memoryAllocatorIndices.resize(vudaNumMemTypes);
+                m_memoryProperties.resize(vudaNumMemTypes);
+
+                vk::MemoryPropertyFlags candidate;
+                uint32_t memoryTypeIndex;
+
+                //
+                // find and define suitable memory types
+                /*
+                    some general rule of thumbs:
+                    | OS        | Vendor                            | Comment
+                    =======================================================================================================
+                    | Windows   | all three major PC GPU vendors    | all memory that is HOST_VISIBLE is also HOST_COHERENT
+                    | Windows   | Intel                             | all memory is HOST_VISIBLE
+                    | Mac OS    | AMD, Intel                        | memory that is HOST_CACHED is not HOST_COHERENT
+                */
+                //
+                // memory properties -> memory types
+                memoryTypeIndex = deviceMemProperties.FindMemoryTypeFromCandidates(device, std::vector<vk::MemoryPropertyFlags>{
+                    vk::MemoryPropertyFlagBits::eDeviceLocal
+                }, candidate);
+                m_memoryAllocatorIndices[vudaMemoryTypes::eDeviceLocal] = memoryTypeIndex;
+                m_memoryProperties[vudaMemoryTypes::eDeviceLocal] = candidate;
+                
+                memoryTypeIndex = deviceMemProperties.FindMemoryTypeFromCandidates(device, std::vector<vk::MemoryPropertyFlags>{ 
+                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent                
+                }, candidate);
+                m_memoryAllocatorIndices[vudaMemoryTypes::ePinned] = memoryTypeIndex;
+                m_memoryProperties[vudaMemoryTypes::ePinned] = candidate;
+                m_memoryAllocatorIndices[vudaMemoryTypes::ePinned_Internal] = memoryTypeIndex;
+                m_memoryProperties[vudaMemoryTypes::ePinned_Internal] = candidate;
+
+                memoryTypeIndex = deviceMemProperties.FindMemoryTypeFromCandidates(device, std::vector<vk::MemoryPropertyFlags>{
+                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCached | vk::MemoryPropertyFlagBits::eHostCoherent, // first try if we can get coherent memory
+                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCached,                                             // then we settle non-coherent but cached
+                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent                                            // guaranteed fallback
+                }, candidate);
+                m_memoryAllocatorIndices[vudaMemoryTypes::eCached] = memoryTypeIndex;
+                m_memoryProperties[vudaMemoryTypes::eCached] = candidate;
+                m_memoryAllocatorIndices[vudaMemoryTypes::eCached_Internal] = memoryTypeIndex;
+                m_memoryProperties[vudaMemoryTypes::eCached_Internal] = candidate;
+
+                //
+                //
+                vk::DeviceSize device_memory_size = deviceMemProperties.GetDeviceLocalMemorySize();
                 m_defaultChunkSize = std::min<vk::DeviceSize>(device_memory_size / 16, m_defaultChunkSize);
 
                 //
                 // types of memory
                 std::vector<uint32_t> memoryIndices;
-                uint32_t numMemTypes = vudaGetNumberOfMemoryTypes(physDevice, memoryIndices);
+                uint32_t numMemTypes = deviceMemProperties.GetNumberOfUniqueMemoryTypes(memoryIndices);
 
-                for(size_t i = 0; i < m_memoryIndexToPureIndex.size(); ++i)
-                {
-                    m_creation_locks.push_back(std::make_unique<std::atomic<bool>>());
-                    m_creation_locks.back()->store(false);
-                }
+                // pure index -> memory index
+                for(uint32_t i = 0; i < numMemTypes; ++i)
+                    m_memoryIndexToPureIndex[memoryIndices[i]] = i;
 
+                //
+                // allocate a vector for each type of memory
                 m_type_chunks.resize(numMemTypes);
+                m_creation_locks.resize(numMemTypes);
                 m_mtxTypeChunks.resize(numMemTypes);
+
+                //
+                // allocate creation locks and mutex for each type of memory
                 for(size_t i = 0; i < numMemTypes; ++i)
                 {
-                    m_mtxTypeChunks[i] = std::make_unique<std::shared_mutex>();                
+                    m_creation_locks[i] = std::make_unique<std::atomic<bool>>();
+                    m_creation_locks[i]->store(false);
+                    m_mtxTypeChunks[i] = std::make_unique<std::shared_mutex>();
                 }
             }
 
-            memory_block* allocate(const vk::MemoryPropertyFlags& memory_properties, const vk::DeviceSize size)
+            //memory_block* allocate(const vk::MemoryPropertyFlags& memory_properties, const vk::DeviceSize size)
+            memory_block* allocate(const vudaMemoryTypes& memory_type, const vk::DeviceSize size)
             {
                 memory_block* block;
 
                 //
                 // will throw exception if m_memoryAllocatorTypes does not know the set of memory properties
-                uint32_t pureIndex = m_memoryIndexToPureIndex.at(VkFlags(memory_properties));
+                //uint32_t pureIndex = m_memoryIndexToPureIndex.at(VkFlags(memory_properties));
+                uint32_t pureIndex = m_memoryIndexToPureIndex[m_memoryAllocatorIndices[memory_type]];
             
                 while(true)
                 {
@@ -312,7 +361,7 @@ namespace vuda
                             use_size = size;
                         }
 
-                        m_type_chunks[pureIndex].emplace_back(m_physDevice, m_device, memory_properties, use_size);
+                        m_type_chunks[pureIndex].emplace_back(m_physDevice, m_device, IsHostVisible(memory_type), m_memoryAllocatorIndices[memory_type], use_size);
 
                         /*std::stringstream ostr;
                         ostr << "creating chunk" << std::endl;
@@ -328,6 +377,22 @@ namespace vuda
                             ;
                     }
                 }
+            }
+
+            inline bool IsHostVisible(const vudaMemoryTypes& memory_type)
+            {
+                if(m_memoryProperties[memory_type] & vk::MemoryPropertyFlagBits::eHostVisible)
+                    return true;
+                else
+                    return false;
+            }
+
+            inline bool IsHostCoherent(const vudaMemoryTypes& memory_type)
+            {
+                if(m_memoryProperties[memory_type] & vk::MemoryPropertyFlagBits::eHostCoherent)
+                    return true;
+                else
+                    return false;
             }
 
             /*memory_block* allocate(const vk::DeviceSize size, const vk::DeviceSize alignment)
@@ -396,7 +461,7 @@ namespace vuda
         private:
 
             /*
-                private non-synchronized implementation        
+                private non-synchronized implementation
             */
 
             /*void set_default_alloc_size(const vk::DeviceSize default_alloc_size)
@@ -407,7 +472,7 @@ namespace vuda
         private:
 
             //
-            // keep memory allocator associated to one device        
+            // keep memory allocator associated to one device
             const vk::PhysicalDevice m_physDevice;
             const vk::Device m_device;
 
@@ -416,7 +481,7 @@ namespace vuda
             vk::DeviceSize m_defaultChunkSize;
 
             //
-            // chunks of memory        
+            // chunks of memory
             /*std::shared_mutex m_mtxChunks;
             std::vector<memory_chunk> m_chunks;*/
 
@@ -426,8 +491,9 @@ namespace vuda
             std::vector<std::unique_ptr<std::shared_mutex>> m_mtxTypeChunks;
             std::vector<std::vector<memory_chunk>> m_type_chunks;
 
-            std::unordered_map<VkFlags, uint32_t> m_memoryAllocatorTypes;
-            std::unordered_map<VkFlags, uint32_t> m_memoryIndexToPureIndex;
+            std::vector<uint32_t> m_memoryAllocatorIndices;
+            std::vector<vk::MemoryPropertyFlags> m_memoryProperties;
+            std::unordered_map<uint32_t, uint32_t> m_memoryIndexToPureIndex;
         };
 
     } //namespace detail

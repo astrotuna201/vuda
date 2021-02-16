@@ -19,16 +19,11 @@ namespace vuda
         {
         public:
             device_buffer_node(const size_t size, memory_allocator& allocator) :
-                default_storage_node(vk::MemoryPropertyFlags(memoryPropertiesFlags::eDeviceProperties), size, allocator)
+                default_storage_node(vudaMemoryTypes::eDeviceLocal, size, allocator)
             {
                 //
                 // reserve address range in virtual memory (platform dependent)
                 m_ptrVirtual = VirtAlloc(size, m_allocatedSize);
-
-    #ifdef VUDA_DEBUG_ENABLED
-                if(m_ptrVirtual == nullptr)
-                    throw std::runtime_error("vuda: virtual memory reservation failed!");
-    #endif
 
                 //
                 // the memory remains mapped until it is freed by the user calling free/destroy
@@ -38,45 +33,32 @@ namespace vuda
 
             ~device_buffer_node()
             {
-                // call destroy?
             }
 
-            void set_data(default_storage_node* node)
-            {
-                // invoke base
-                default_storage_node::set_data(node);
-            
-                //
-                // copy data
-                device_buffer_node* deriv = static_cast<device_buffer_node*>(node);
-                m_allocatedSize = deriv->m_allocatedSize;
-                m_ptrVirtual = deriv->m_ptrVirtual;
-            }
-
-            void destroy(void)
+            void destroy(void) override
             {
                 // invoke base
                 default_storage_node::destroy();
 
                 //
                 // clean up virtual mem reservation
-                int retflag = VirtFree(m_ptrVirtual, m_allocatedSize);
-
-    //#ifdef VUDA_DEBUG_ENABLED
-                if(retflag == 0)
-                    throw std::runtime_error("vuda: failed to free virtual memory reservation!");
-    //#endif
+                VirtFree(m_ptrVirtual, m_allocatedSize);
+                m_ptrVirtual = nullptr;
             }
 
             //
-            // get functions        
-
-            void* mem_ptr(void) const
-            {
-                return m_ptrVirtual;
+            // get functions
+            std::ostringstream print(int depth = 0) const override
+            {   
+                std::ostringstream ostr;
+                ostr << std::this_thread::get_id() << ": ";
+                for(int i = 0; i < depth; ++i)
+                    ostr << "-";
+                ostr << key() << " " << (uintptr_t)key() << " " << range() << " " << (uintptr_t)key() + range() << " (device buffer node)" << std::endl;
+                return ostr;
             }
             
-        private:        
+        private:
 
             size_t m_allocatedSize;
             void* m_ptrVirtual;

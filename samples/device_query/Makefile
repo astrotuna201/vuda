@@ -1,12 +1,11 @@
 include ../config.mk
 
-EXECUTABLE=specializedkernels
+EXECUTABLE=device_query
 SOURCES=$(EXECUTABLE).cpp
-CUDA_SRC=$(EXECUTABLE)_cuda.cu
+CUDA_SRC=$(EXECUTABLE).cpp
 
 $(EXECUTABLE): $(SOURCES)
 	$(CC) $(CFLAGS) $^ -o $@ $(INCLUDE) $(LDFLAGS)
-	glslangValidator -V threadid.comp -o threadid.spv
 
 cuda: $(CUDA_SRC)
 	$(NVCC) $^ -o $(EXECUTABLE)_$@

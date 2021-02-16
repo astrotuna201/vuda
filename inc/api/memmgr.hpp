@@ -23,7 +23,7 @@ namespace vuda
         return free(ptr);
     }
 
-    //Allocates page-locked memory on the host. 
+    //Allocates page-locked memory on the host.
     /*__host__*/
     inline error_t hostAlloc(void** pHost, size_t size, unsigned int flags=0)
     {
@@ -35,6 +35,8 @@ namespace vuda
         // allocate mem on the device
         if(flags == hostAllocDefault)
             tinfo->GetLogicalDevice()->mallocHost(pHost, size);
+        /*else if(flags == hostAllocPortable)
+        else if(flags == hostAllocMapped)*/
         else if(flags == hostAllocWriteCombined)
             tinfo->GetLogicalDevice()->hostAlloc(pHost, size);
         else
@@ -69,7 +71,7 @@ namespace vuda
         // allocate mem on the device
         tinfo->GetLogicalDevice()->mallocHost(ptr, size);
 
-        return vudaSuccess;        
+        return vudaSuccess;
     }
 
     /**
@@ -91,7 +93,7 @@ namespace vuda
             //
             // [ consider introducing internal synchronization with device queues (might work better with async jobs) ]
             std::memcpy(dst, src, count);
-            //tinfo.GetLogicalDevice()->memcpyHtH(tid, dst, src, count, stream);            
+            //tinfo.GetLogicalDevice()->memcpyHtH(tid, dst, src, count, stream);
         }
         else if(kind == vuda::memcpyHostToDevice)
         {
@@ -106,7 +108,7 @@ namespace vuda
             tinfo->GetLogicalDevice()->memcpyDeviceToDevice(tid, dst, src, count, stream);
         }
         else if(kind == vuda::memcpyDeviceToHost)
-        {            
+        {
             //
             // submit the copy command to command buffer
             tinfo->GetLogicalDevice()->memcpyToHost(tid, dst, src, count, stream);

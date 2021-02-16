@@ -16,31 +16,31 @@ namespace vuda
         class bst_node
         {
         public:
-            bst_node() :            
+            bst_node() :
                 m_p(nullptr),
                 m_left(nullptr),
                 m_right(nullptr)
             {
-            }        
+            }
 
-            virtual void print(int depth = 0) const {}
+            virtual std::ostringstream print(int depth = 0) const = 0;
 
             //
             // sets
-            void set_parent(Derived* node) { m_p = node; }
-            void set_left(Derived* node) { m_left = node; }
-            void set_right(Derived* node) { m_right = node; }
-            virtual void set_key(const KeyType& key, const size_t& range) { m_key = key; m_range = range; }
+            inline void set_parent(Derived* node) { m_p = node; }
+            inline void set_left(Derived* node) { m_left = node; }
+            inline void set_right(Derived* node) { m_right = node; }
+            inline void set_key(const KeyType& key, const size_t& range) { m_key = key; m_range = range; }
             //virtual void set_range(const size_t& range) { m_range = range; }
-            virtual void set_data(Derived* node) = 0;
+            //virtual void set_data(Derived* node) = 0;
 
             //
             // gets
-            Derived* parent(void) const { return m_p; }
-            Derived* left(void) const { return m_left; }
-            Derived* right(void) const { return m_right; }
-            KeyType key(void) const { return m_key; }
-            size_t range(void) const { return m_range; }
+            inline Derived* parent(void) const { return m_p; }
+            inline Derived* left(void) const { return m_left; }
+            inline Derived* right(void) const { return m_right; }
+            inline KeyType key(void) const { return m_key; }
+            inline size_t range(void) const { return m_range; }
 
         private:
 
@@ -58,54 +58,6 @@ namespace vuda
             Derived* m_right;
         };
 
-        class bst_default_node : public bst_node<bst_default_node, void*>
-        {
-        public:
-
-            bst_default_node()
-            {
-                set_key(this, 1);            
-            }
-
-            void print(int depth = 0) const
-            {
-                std::ostringstream ostr;
-                for(int i = 0; i < depth; ++i)
-                    ostr << "-";
-                ostr << key() << " " << (uintptr_t)key() << std::endl;
-                std::cout << ostr.str();
-            }
-
-            void set_data(bst_default_node* node)
-            {
-                m_example = node->m_example;
-            }
-
-        private:
-
-            // satellite data
-            float m_example;
-        };
-
-        class bst_derived_node : public bst_default_node
-        {
-        public:
-
-            void set_data(bst_default_node* node)
-            {
-                //
-                // invoke base
-                bst_default_node::set_data(node);
-
-                // copy node's satellite data                        
-                bst_derived_node* deriv = static_cast<bst_derived_node*>(node);
-                m_moredata = deriv->m_moredata;
-            }
-
-        private:
-            float m_moredata;
-        };
-
         template<class NodeType, typename KeyType>
         class bst
         {
@@ -117,7 +69,7 @@ namespace vuda
                 if(node != nullptr)
                 {
                     walk(node->left());
-                    node->print();
+                    std::cout << node->print().str();
                     walk(node->right());
                 }
             }
@@ -127,7 +79,7 @@ namespace vuda
                 if(node != nullptr)
                 {
                     walk_depth(node->left(), depth + 1);
-                    node->print(depth);
+                    std::cout << node->print(depth).str();
                     walk_depth(node->right(), depth + 1);
                 }
             }
@@ -155,7 +107,7 @@ namespace vuda
                         x = x->right();
                 }
                 z->set_parent(y);
-                if(y == nullptr)            
+                if(y == nullptr)
                     root = z; // the tree was empty
                 else
                 {
@@ -175,21 +127,38 @@ namespace vuda
                 NodeType* x;
                 NodeType* y;
 
+                //
+                // find the node y that is going to be spliced out
+                // 1. either it is the input node z (if it has at most one child)
+                // 2. or it is the successor of z (if it has two children)
                 if(z->left() == nullptr || z->right() == nullptr)
                     y = z;
                 else
                     y = successor(z);
 
+                //
+                // x is set to an existing child of y (or null if it has none).
                 if(y->left() != nullptr)
                     x = y->left();
                 else
                     x = y->right();
 
+                
+                //
+                // the node y is going to be spliced out
+                // 1. by modifying the parent of y
+                // 2. and x
+                // special cases are:
+                // 1. y == root, i.e. the parent is null
+                // 2. x == null, 
+                
                 if(x != nullptr)
                     x->set_parent(y->parent());
 
                 if(y->parent() == nullptr)
+                {
                     root = x;
+                }
                 else
                 {
                     if(y == y->parent()->left())
@@ -198,11 +167,43 @@ namespace vuda
                         y->parent()->set_right(x);
                 }
 
+                //
+                // if the successor is the one being spliced out, y should replace z.
                 if(y != z)
                 {
-                    z->set_key(y->key(), y->range());
-                    z->set_data(y);
-                    // copy y's satelite data into z
+                    // y is moved into node z
+                    //z->set_key(y->key(), y->range());
+                    //z->set_data(y);
+
+                    // we make y replace z instead of copying y's key and data
+                    y->set_parent(z->parent());
+                    y->set_left(z->left());
+                    y->set_right(z->right());
+
+                    //
+                    // update the parent
+                    if(y->parent() == nullptr)
+                        root = y;
+                    else
+                    {
+                        if(z == y->parent()->left())
+                            y->parent()->set_left(y);
+                        else
+                            y->parent()->set_right(y);
+                    }
+
+                    //
+                    // update the childrens parent, both children may not exist at this point
+                    if(y->left() != nullptr)
+                        y->left()->set_parent(y);
+                    //else
+                        //std::cout << "no left child" << std::endl;
+                    if(y->right() != nullptr)
+                        y->right()->set_parent(y);
+                    //else
+                        //std::cout << "no right child" << std::endl;
+
+                    return z;
                 }
 
                 return y;
@@ -215,7 +216,7 @@ namespace vuda
                  - maximum
                  - successor
                  - predecessor
-                 run in O(h) on the bst of height h        
+                 run in O(h) on the bst of height h
             */
 
             /*// tree search recursive
@@ -252,7 +253,7 @@ namespace vuda
                 //std::size_t mindiffkey = std::numeric_limits<std::size_t>::max(); // std::numeric_limits<std::ptrdiff_t>::max();
 
                 std::int8_t diffkey_sign;
-                std::size_t absdiffkey;                
+                std::size_t absdiffkey;
                 std::int8_t minkey_sign = 1;
                 std::size_t minkey = (std::numeric_limits<std::size_t>::max)();
                 NodeType* minnode = nullptr;
@@ -262,7 +263,6 @@ namespace vuda
                 while(node != nullptr)
                 {
                     //
-                    // diffkey = static_cast<const char*>(key) - static_cast<const char*>(node->key());
                     // store the difference between the keys with full precision
                     if(key < node->key())
                     {
@@ -274,7 +274,7 @@ namespace vuda
                     {
                         // key is to the right of the node key
                         absdiffkey = static_cast<const char*>(key) - static_cast<const char*>(node->key());
-                        diffkey_sign = 1;                        
+                        diffkey_sign = 1;
                     }
                     
                     //
@@ -296,7 +296,7 @@ namespace vuda
                     else
                         node = node->right();
                 }
-                                
+
                 //
                 // when minkey is negative we find the predecessor
                 if(minkey_sign < 0)
